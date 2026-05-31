@@ -1,11 +1,12 @@
 import argparse
 from pathlib import Path
 
+import cv2
 import numpy as np
 from PIL import Image
 
 
-def load_image(path: Path) -> np.ndarray:
+def load_image_rgb(path: Path) -> np.ndarray:
     try:
         image = Image.open(path).convert("RGB")
     except OSError as exc:
@@ -14,6 +15,10 @@ def load_image(path: Path) -> np.ndarray:
     if image_array.size == 0:
         raise FileNotFoundError(f"Could not read image: {path}")
     return image_array
+
+
+def rgb_to_yuv(image_rgb: np.ndarray) -> np.ndarray:
+    return cv2.cvtColor(image_rgb, cv2.COLOR_RGB2YUV)
 
 
 def mse(a: np.ndarray, b: np.ndarray) -> float:
@@ -71,17 +76,20 @@ def compare_images(
     original_outputs: tuple[Path | None, Path | None, Path | None] | None = None,
     diff_outputs: tuple[Path | None, Path | None, Path | None] | None = None,
 ) -> None:
-    original = load_image(original_path)
-    embedded = load_image(embedded_path)
+    original_rgb = load_image_rgb(original_path)
+    embedded_rgb = load_image_rgb(embedded_path)
 
-    if original.shape != embedded.shape:
+    if original_rgb.shape != embedded_rgb.shape:
         raise ValueError(
             "Image shapes do not match: "
-            f"{original.shape} vs {embedded.shape}. "
+            f"{original_rgb.shape} vs {embedded_rgb.shape}. "
             "Compare images with the same resolution."
         )
 
-    abs_diff = np.abs(original.astype(np.int16) - embedded.astype(np.int16))
+    original_yuv = rgb_to_yuv(original_rgb)
+    embedded_yuv = rgb_to_yuv(embedded_rgb)
+
+    abs_diff = np.abs(original_yuv.astype(np.int16) - embedded_yuv.astype(np.int16))
     changed_mask = np.any(abs_diff > 0, axis=2)
 
     total_pixels = int(changed_mask.size)
@@ -90,9 +98,9 @@ def compare_images(
 
     max_diff = int(abs_diff.max())
     mean_abs_diff = float(abs_diff.mean())
-    mse_value = mse(original, embedded)
+    mse_value = mse(original_yuv, embedded_yuv)
     psnr_value = psnr(mse_value)
-    channel_labels = ("R", "G", "B")
+    channel_labels = ("Y", "U", "V")
     channel_changed_counts = [int(np.count_nonzero(abs_diff[:, :, channel])) for channel in range(3)]
     channel_max_diff = [int(abs_diff[:, :, channel].max()) for channel in range(3)]
     channel_mean_abs_diff = [float(abs_diff[:, :, channel].mean()) for channel in range(3)]
@@ -101,14 +109,15 @@ def compare_images(
 
     print(f"Original: {original_path}")
     print(f"Embedded:  {embedded_path}")
-    print(f"Shape:     {original.shape}")
+    print(f"Shape:     {original_rgb.shape}")
+    print("Space:     YUV")
     print(f"Changed pixels: {changed_pixels} / {total_pixels} ({changed_ratio:.6%})")
     print(f"Max abs diff:   {max_diff}")
     print(f"Mean abs diff:  {mean_abs_diff:.6f}")
     print(f"MSE:            {mse_value:.6f}")
     print(f"PSNR:           {psnr_value:.4f} dB")
 
-    print("Per-channel RGB diff statistics:")
+    print("Per-channel YUV diff statistics:")
     for index, label in enumerate(channel_labels):
         print(f"{label} channel:")
         print(f"  changed pixels: {channel_changed_counts[index]}")
@@ -120,7 +129,7 @@ def compare_images(
     if original_outputs is not None:
         for index, output_path in enumerate(original_outputs):
             if output_path is not None:
-                save_channel_image(original[:, :, index], output_path)
+                save_channel_image(original_yuv[:, :, index], output_path)
                 print(f"{channel_labels[index]} original channel saved to: {output_path}")
 
     if diff_outputs is not None:
@@ -132,7 +141,7 @@ def compare_images(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Compare two images pixel by pixel and report the difference."
+        description="Compare two images in YUV space and report per-channel differences."
     )
     parser.add_argument(
         "--original",
@@ -149,14 +158,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--diff-output-prefix",
         type=Path,
-        default=Path("examples/output/diff_rgb"),
-        help="Prefix for saving channel diff images. Files will be suffixed with _r.png, _g.png, _b.png.",
+        default=Path("examples/output/diff_yuv"),
+        help="Prefix for saving channel diff images. Files will be suffixed with _y.png, _u.png, _v.png.",
     )
     parser.add_argument(
         "--original-output-prefix",
         type=Path,
-        default=Path("examples/output/original_rgb"),
-        help="Prefix for saving original channel images. Files will be suffixed with _r.png, _g.png, _b.png.",
+        default=Path("examples/output/original_yuv"),
+        help="Prefix for saving original channel images. Files will be suffixed with _y.png, _u.png, _v.png.",
     )
     parser.add_argument(
         "--no-diff-output",
@@ -169,17 +178,17 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     original_outputs = (
-        Path(f"{args.original_output_prefix}_r.png"),
-        Path(f"{args.original_output_prefix}_g.png"),
-        Path(f"{args.original_output_prefix}_b.png"),
+        Path(f"{args.original_output_prefix}_y.png"),
+        Path(f"{args.original_output_prefix}_u.png"),
+        Path(f"{args.original_output_prefix}_v.png"),
     )
     if args.no_diff_output:
         diff_outputs = None
     else:
         diff_outputs = (
-            Path(f"{args.diff_output_prefix}_r.png"),
-            Path(f"{args.diff_output_prefix}_g.png"),
-            Path(f"{args.diff_output_prefix}_b.png"),
+            Path(f"{args.diff_output_prefix}_y.png"),
+            Path(f"{args.diff_output_prefix}_u.png"),
+            Path(f"{args.diff_output_prefix}_v.png"),
         )
     compare_images(args.original, args.embedded, original_outputs, diff_outputs)
 
