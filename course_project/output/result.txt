@@ -1,0 +1,4 @@
+watermark_text=SignalSystem
+watermark_bits=96
+extracted_text=SignalSystem
+bit_errors=0

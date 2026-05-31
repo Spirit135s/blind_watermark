@@ -1,0 +1,4 @@
+watermark_bits=96
+block_grid=(138, 92)
+d1=36
+d2=20

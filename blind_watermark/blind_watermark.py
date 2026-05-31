@@ -15,8 +15,12 @@ class WaterMark:
     def __init__(self, password_wm=1, password_img=1, block_shape=(4, 4), mode='common', processes=None):
         bw_notes.print_notes()
 
+        # WaterMark 是给用户调用的外层封装；真正的 DWT-DCT-SVD 频域嵌入、
+        # 提取逻辑在 WaterMarkCore 中完成。
         self.bwm_core = WaterMarkCore(password_img=password_img, mode=mode, processes=processes)
 
+        # password_wm 只作用在水印 bit 序列上，用于打乱水印顺序；
+        # password_img 则在 WaterMarkCore 中作用于图像频域块的系数置乱。
         self.password_wm = password_wm
 
         self.wm_bit = None
@@ -28,11 +32,14 @@ class WaterMark:
             img = cv2.imread(filename, flags=cv2.IMREAD_UNCHANGED)
             assert img is not None, "image file '{filename}' not read".format(filename=filename)
 
+        # 将图像交给核心层预处理：转 YUV、DWT 分解、低频分块。
         self.bwm_core.read_img_arr(img=img)
         return img
 
     def read_wm(self, wm_content, mode='img'):
         assert mode in ('img', 'str', 'bit'), "mode in ('img','str','bit')"
+        # 外层 API 允许三类水印输入，但核心算法只处理一维 bit 序列。
+        # 因此这里先把图片、字符串或用户传入的 bit 数据统一转换为 wm_bit。
         if mode == 'img':
             wm = cv2.imread(filename=wm_content, flags=cv2.IMREAD_GRAYSCALE)
             assert wm is not None, 'file "{filename}" not read'.format(filename=wm_content)
@@ -48,6 +55,9 @@ class WaterMark:
 
         self.wm_size = self.wm_bit.size
 
+        # 对水印本身做置乱，相当于水印侧密钥。即使提取出 bit，
+        # 没有同样的 password_wm 也难以恢复原始顺序。
+
         # 水印加密:
         np.random.RandomState(self.password_wm).shuffle(self.wm_bit)
 
@@ -62,8 +72,11 @@ class WaterMark:
             If compression_ratio is integer between 0 and 100, the smaller, the output file is smaller.
         :return:
         '''
+        # 核心层返回的是已经完成逆变换的含水印图像数组。
         embed_img = self.bwm_core.embed()
         if filename is not None:
+            # compression_ratio 只影响保存时的 JPEG/PNG 压缩参数，
+            # 不改变频域水印嵌入算法本身。
             if compression_ratio is None:
                 cv2.imwrite(filename=filename, img=embed_img)
             elif filename.endswith('.jpg'):
@@ -75,6 +88,8 @@ class WaterMark:
         return embed_img
 
     def extract_decrypt(self, wm_avg):
+        # 嵌入前对水印 bit 做过同样 seed 的 shuffle。
+        # 这里重新生成被打乱的索引，把提取结果放回原始水印顺序。
         wm_index = np.arange(self.wm_size)
         np.random.RandomState(self.password_wm).shuffle(wm_index)
         wm_avg[wm_index] = wm_avg.copy()
@@ -89,6 +104,8 @@ class WaterMark:
 
         self.wm_size = np.array(wm_shape).prod()
 
+        # 字符串和 bit 水印需要明确判决为 0/1，因此使用 k-means 自动找阈值；
+        # 图片水印保留平均值再重排成图像，便于输出灰度水印图。
         if mode in ('str', 'bit'):
             wm_avg = self.bwm_core.extract_with_kmeans(img=embed_img, wm_shape=wm_shape)
         else:

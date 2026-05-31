@@ -1,12 +1,15 @@
 # coding=utf-8
 
 # attack on the watermark
+# 这些函数用于课程实验中的鲁棒性测试：先对含水印图像做裁剪、缩放、
+# 亮度、噪声或遮挡等攻击，再观察是否仍能提取出水印。
 import cv2
 import numpy as np
 import warnings
 
 
 def cut_att3(input_filename=None, input_img=None, output_file_name=None, loc_r=None, loc=None, scale=None):
+    # loc/loc_r 指定裁剪区域；scale 用于模拟裁剪后又被缩放的截屏类攻击。
     # 剪切攻击 + 缩放攻击
     if input_filename:
         input_img = cv2.imread(input_filename)

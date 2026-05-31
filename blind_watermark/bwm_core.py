@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+ #!/usr/bin/env python3
 # coding=utf-8
 # @Time    : 2021/12/17
 # @Author  : github.com/guofei9987
@@ -15,6 +15,8 @@ class WaterMarkCore:
     def __init__(self, password_img=1, mode='common', processes=None):
         self.block_shape = np.array([4, 4])
         self.password_img = password_img
+        # 嵌入强度参数：数值越大，奇异值被推开的间隔越大，抗攻击能力通常越强，
+        # 但频域系数改动也越明显，含水印图像的失真会随之增加。
         self.d1, self.d2 = 36, 20  # d1/d2 越大鲁棒性越强,但输出图片的失真越大
 
         # init data
@@ -34,6 +36,8 @@ class WaterMarkCore:
         assert self.wm_size < self.block_num, IndexError(
             '最多可嵌入{}kb信息，多于水印的{}kb信息，溢出'.format(self.block_num / 1000, self.wm_size / 1000))
         # self.part_shape 是取整后的ca二维大小,用于嵌入时忽略右边和下面对不齐的细条部分。
+        # 每个低频 4x4 块嵌入 1 bit。水印长度小于块数时，会循环重复嵌入，
+        # 后续提取时再对重复位置做平均，从而提高鲁棒性。
         self.part_shape = self.ca_block_shape[:2] * self.block_shape
         self.block_index = [(i, j) for i in range(self.ca_block_shape[0]) for j in range(self.ca_block_shape[1])]
 
@@ -49,6 +53,9 @@ class WaterMarkCore:
         self.img = img.astype(np.float32)
         self.img_shape = self.img.shape[:2]
 
+        # 先转到 YUV 空间，再对三个通道分别做频域处理。Y 通道对应亮度，
+        # U/V 通道对应色度；在频域分散嵌入可兼顾不可见性和鲁棒性。
+
         # 如果不是偶数，那么补上白边，Y（明亮度）UV（颜色）
         self.img_YUV = cv2.copyMakeBorder(cv2.cvtColor(self.img, cv2.COLOR_BGR2YUV),
                                           0, self.img.shape[0] % 2, 0, self.img.shape[1] % 2,
@@ -56,11 +63,15 @@ class WaterMarkCore:
 
         self.ca_shape = [(i + 1) // 2 for i in self.img_shape]
 
+        # DWT 后的低频子带 ca 尺寸约为原图一半。这里把 ca 切成 4x4 小块，
+        # 之后每个小块再做 DCT 和 SVD，水印 bit 就嵌入这些小块的奇异值中。
         self.ca_block_shape = (self.ca_shape[0] // self.block_shape[0], self.ca_shape[1] // self.block_shape[1],
                                self.block_shape[0], self.block_shape[1])
         strides = 4 * np.array([self.ca_shape[1] * self.block_shape[0], self.block_shape[1], self.ca_shape[1], 1])
 
         for channel in range(3):
+            # Haar 小波分解得到低频 ca 和高频细节 hvd。水印只写入 ca，
+            # 因为低频部分在压缩、缩放等攻击下更稳定。
             self.ca[channel], self.hvd[channel] = dwt2(self.img_YUV[:, :, channel], 'haar')
             # 转为4维度
             self.ca_block[channel] = np.lib.stride_tricks.as_strided(self.ca[channel].astype(np.float32),
@@ -78,6 +89,9 @@ class WaterMarkCore:
 
     def block_add_wm_slow(self, arg):
         block, shuffler, i = arg
+        # 单个 4x4 低频块的嵌入流程：
+        # DCT 将局部块转到频域；按密钥打乱 DCT 系数位置；SVD 分解后修改奇异值；
+        # 再逆 SVD、恢复系数顺序、逆 DCT 回到小波低频块。
         # dct->(flatten->加密->逆flatten)->svd->打水印->逆svd->(flatten->解密->逆flatten)->逆dct
         wm_1 = self.wm_bit[i % self.wm_size]
         block_dct = dct(block)
@@ -85,6 +99,8 @@ class WaterMarkCore:
         # 加密（打乱顺序）
         block_dct_shuffled = block_dct.flatten()[shuffler].reshape(self.block_shape)
         u, s, v = svd(block_dct_shuffled)
+        # 通过把奇异值落到不同的模区间表示 0/1：
+        # 低半区表示 0，高半区表示 1。d1/d2 控制这两个区间的间隔。
         s[0] = (s[0] // self.d1 + 1 / 4 + 1 / 2 * wm_1) * self.d1
         if self.d2:
             s[1] = (s[1] // self.d2 + 1 / 4 + 1 / 2 * wm_1) * self.d2
@@ -109,9 +125,12 @@ class WaterMarkCore:
         embed_ca = copy.deepcopy(self.ca)
         embed_YUV = [np.array([])] * 3
 
+        # password_img 决定每个块内 DCT 系数的置乱顺序。
+        # 提取阶段只要使用同一密钥，就能按相同顺序读取奇异值。
         self.idx_shuffle = random_strategy1(self.password_img, self.block_num,
                                             self.block_shape[0] * self.block_shape[1])
         for channel in range(3):
+            # 对每个通道的所有低频块嵌入水印。pool.map 可在串行、线程或进程模式下工作。
             tmp = self.pool.map(self.block_add_wm,
                                 [(self.ca_block[channel][self.block_index[i]], self.idx_shuffle[i], i)
                                  for i in range(self.block_num)])
@@ -145,6 +164,8 @@ class WaterMarkCore:
 
     def block_get_wm_slow(self, args):
         block, shuffler = args
+        # 提取阶段不需要原图：只对含水印图做同样的 DWT、DCT、置乱和 SVD，
+        # 再观察奇异值落在 d1/d2 周期的前半区还是后半区。
         # dct->flatten->加密->逆flatten->svd->解水印
         block_dct_shuffled = dct(block).flatten()[shuffler].reshape(self.block_shape)
 
@@ -168,6 +189,8 @@ class WaterMarkCore:
         self.read_img_arr(img=img)
         self.init_block_index()
 
+        # 三个通道分别提取所有块的水印估计值，后续会把同一 bit 的多次嵌入结果平均。
+
         wm_block_bit = np.zeros(shape=(3, self.block_num))  # 3个channel，length 个分块提取的水印，全都记录下来
 
         self.idx_shuffle = random_strategy1(seed=self.password_img,
@@ -182,6 +205,8 @@ class WaterMarkCore:
 
     def extract_avg(self, wm_block_bit):
         # 对循环嵌入+3个 channel 求平均
+        # 水印是按 i % wm_size 循环嵌入的，因此第 i 个水印 bit 会分布在
+        # i, i+wm_size, i+2*wm_size... 这些块中；这里对这些重复观测求平均。
         wm_avg = np.zeros(shape=self.wm_size)
         for i in range(self.wm_size):
             wm_avg[i] = wm_block_bit[:, i::self.wm_size].mean()
@@ -203,6 +228,8 @@ class WaterMarkCore:
 
 
 def one_dim_kmeans(inputs):
+    # 对字符串/bit 水印，提取结果需要变成明确的 0/1。
+    # 这里用一维 k-means 自动寻找阈值，比固定 0.5 更能适应攻击后的漂移。
     threshold = 0
     e_tol = 10 ** (-6)
     center = [inputs.min(), inputs.max()]  # 1. 初始化中心点

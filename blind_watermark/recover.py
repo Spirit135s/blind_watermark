@@ -4,6 +4,11 @@ import numpy as np
 import functools
 
 
+# 裁剪/截屏攻击会改变水印图在原始画布中的位置和尺寸。
+# 本模块用模板匹配估计裁剪块的位置与缩放比例，再把攻击后的图补回原图大小，
+# 便于后续按原算法进行盲水印提取。
+
+
 # 一个帮助缓存化加速的类，引入事实上的全局变量
 class MyValues:
     def __init__(self):
@@ -36,6 +41,7 @@ def match_template_by_scale(scale):
 
 def search_template(scale=(0.5, 2), search_num=200):
     image, template = my_value.image, my_value.template
+    # 在给定缩放范围内搜索模板与原图的最佳匹配，用于估计裁剪攻击参数。
     # 局部暴力搜索算法，寻找最优的scale
     tmp = []
     min_scale, max_scale = scale
@@ -91,6 +97,8 @@ def recover_crop(template_file=None, tem_img=None, output_file_name=None, loc=No
 
     (x1, y1, x2, y2) = loc
 
+    # 将被裁剪/缩放后的图像放回估计位置，其余区域补零。
+    # 这样提取算法仍可按原图尺寸进行 DWT-DCT-SVD 分块。
     img_recovered = np.zeros((image_o_shape[0], image_o_shape[1], 3))
 
     img_recovered[y1:y2, x1:x2, :] = cv2.resize(tem_img, dsize=(x2 - x1, y2 - y1))
